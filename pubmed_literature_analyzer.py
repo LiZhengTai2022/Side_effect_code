@@ -11,11 +11,11 @@ import os
 
 # PubMed API密钥（可选）
 # 获取地址：https://www.ncbi.nlm.nih.gov/account/
-PUBMED_API_KEY = "91a9ced281a314db6512d78b5345fd802908"  # 请在此处填入您的PubMed API密钥，如无则留空
+PUBMED_API_KEY = ""  # 请在此处填入您的PubMed API密钥，如无则留空
 
 # DeepSeek API密钥（可选，用于AI分析）
 # 获取地址：https://platform.deepseek.com/
-DEEPSEEK_API_KEY = "sk-7f2b07a06a214e26b87c28285feb9f9b"  # 请在此处填入您的DeepSeek API密钥，如无则留空
+DEEPSEEK_API_KEY = ""  # 请在此处填入您的DeepSeek API密钥，如无则留空
 
 # 默认文献分析数量
 DEFAULT_MAX_RESULTS = 10000

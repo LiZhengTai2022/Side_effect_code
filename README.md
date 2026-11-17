@@ -1,1 +1,386 @@
 # Side_effect_code
+# 药物-菌群-副作用预测系统
+
+## 系统概述
+
+本系统是一个端到端的药物副作用预测平台，通过整合药物分子结构、菌群蛋白序列、药物-蛋白结合亲和力以及菌群丰度变化方向，预测药物可能引发的副作用类别。
+
+系统包含三个核心模块：
+1. **数据获取模块**：从 PubChem 获取药物 SMILES，从 NCBI 获取菌种蛋白序列
+2. **结合亲和力预测模块**：基于 GATv2 + Transformer 的深度学习模型预测药物-蛋白结合强度
+3. **副作用预测模块**：基于 DNN 的多分类模型，结合因果链分析实现副作用精准跟踪
+
+---
+
+## 一、数据获取流程
+
+### 1.1 药物 SMILES 获取
+
+**脚本**: `drug_fetch.py`
+
+从 `side.xlsx` 中读取"药物名称"列，通过以下 4 个数据源依次尝试获取 SMILES：
+
+| 优先级 | 数据源 | 说明 |
+|--------|--------|------|
+| 1 | pubchempy 库 | PubChem Python 封装库，处理 URL 编码和重试 |
+| 2 | PubChem REST API | 直接调用 PubChem 接口 |
+| 3 | NIH CACTUS | 美国 NIH 化学结构解析服务 |
+| 4 | ChEMBL API | 欧洲生物信息学研究所数据库 |
+
+**中文处理**：使用 DeepSeek API 将中文药物名翻译为英文/拉丁名后再搜索。
+
+**输出**：`side_with_smiles.xlsx`，新增 `SMILES` 列。
+
+### 1.2 菌种蛋白序列获取
+
+**脚本**: `drug_fetch.py`（同一脚本）
+
+从"第一个菌种"列读取菌种名，通过 NCBI E-utilities API 获取蛋白序列：
+
+- **搜索策略**：4 种搜索词依次尝试
+  - `"{name}"[Organism] AND refseq[filter]`
+  - `"{name}"[Organism] AND "complete genome"`
+  - `"{name}"[Organism]`
+  - `{name}`（最宽泛匹配）
+
+- **序列验证**：
+  - 90% 以上字符为 20 种标准氨基酸
+  - 长度 > 50 个氨基酸
+
+**输出**：`side_with_smiles.xlsx`，新增 `Protein_Accession` 和 `Protein_Sequence` 列。
+
+### 1.3 数据过滤
+
+获取 SMILES 后自动删除无 SMILES 的行，减少后续不必要的 NCBI API 调用。
+
+---
+
+## 二、结合亲和力预测
+
+### 2.1 模型架构
+
+**训练脚本**: `train_Trans_2.py`  
+**预测脚本**: `predict_binding.py`
+
+```
+药物分支 (GATv2)                    蛋白分支 (Transformer)
+     │                                    │
+     ▼                                    ▼
+┌─────────┐                        ┌──────────────┐
+│ SMILES  │                        │ 蛋白序列      │
+└────┬────┘                        └──────┬───────┘
+     │                                    │
+     ▼                                    ▼
+┌─────────────┐                   ┌──────────────┐
+│ 原子特征     │                   │ Embedding    │
+│ [原子序数,   │                   │ + Positional │
+│  形式电荷,   │                   │ Encoding     │
+│  总度数]     │                   └──────┬───────┘
+└─────┬───────┘                          │
+      │                                  ▼
+      ▼                           ┌──────────────┐
+┌─────────────┐                   │ Transformer  │
+│ GATv2 × 3   │                   │ Encoder × 2  │
+│ + BatchNorm │                   │ (norm_first) │
+└─────┬───────┘                   └──────┬───────┘
+      │                                  │
+      ▼                                  ▼
+┌─────────────┐                   ┌──────────────┐
+│ Mean + Max  │                   │ Attention    │
+│ Pooling     │                   │ Pooling      │
+│ (2×dim)     │                   │ (dim)        │
+└─────┬───────┘                   └──────┬───────┘
+      │                                  │
+      └──────────┬───────────────────────┘
+                 │
+                 ▼
+          ┌──────────────┐
+          │ Cross        │
+          │ Attention    │
+          │ (Query: 2dim)│
+          │ (KV: 2dim)   │
+          └──────┬───────┘
+                 │
+                 ▼
+          ┌──────────────┐
+          │ Interaction  │
+          │ MLP          │
+          └──────┬───────┘
+                 │
+                 ▼
+          ┌─────────────────────────────┐
+          │ Concat [Drug, Prot, Inter]  │
+          │ (5×dim)                     │
+          └──────────────┬──────────────┘
+                         │
+                         ▼
+                  ┌─────────────┐
+                  │ Final MLP   │
+                  │ 5dim→2dim→1 │
+                  └──────┬──────┘
+                         │
+                         ▼
+                  结合亲和力 (标量)
+```
+
+### 2.2 模型配置
+
+| 参数 | 值 |
+|------|-----|
+| 分子特征维度 | 3（原子序数、形式电荷、总度数） |
+| 蛋白 vocab 大小 | 自动构建（`char_to_int.pt`） |
+| model_dim | 256 |
+| GATv2 heads | 4, 4, 1 |
+| Transformer 层数 | 2 |
+| num_heads | 8 |
+| dropout | 0.4 |
+| MAX_SEQ_LEN | 1024 |
+
+### 2.3 模型文件
+
+| 文件 | 说明 |
+|------|------|
+| `best_model-0.9470.pth` | 训练保存的最佳模型权重 |
+| `char_to_int.pt` | 蛋白序列字符到整数的映射表 |
+| `scaler.pkl` | 特征标准化器（StandardScaler） |
+
+---
+
+## 三、副作用预测模型
+
+### 3.1 训练流程
+
+**脚本**: `train_side_effect_model.py`
+
+#### 3.1.1 数据准备
+
+| 步骤 | 说明 |
+|------|------|
+| 读取数据 | `side_with_smiles.xlsx` |
+| 类别筛选 | 保留样本数前 8 的副作用类别 |
+| 标签编码 | `LabelEncoder` 将类别映射为 0-7 |
+| 特征提取 | Morgan 指纹 + 蛋白特征 + 结合分数 + 变化方向 |
+
+#### 3.1.2 特征工程
+
+| 特征类型 | 维度 | 说明 |
+|---------|------|------|
+| Morgan 指纹 (ECFP) | 2048 | 半径 2，2048 位，捕获分子子结构 |
+| 氨基酸组成 | 20 | 20 种氨基酸在蛋白中的比例 |
+| 蛋白统计特征 | 5 | 相对长度、疏水性、带电性、极性、半胱氨酸比例 |
+| 结合预测分数 | 1 | 结合模型预测的亲和力值 |
+| 菌种变化方向 | 1 | increase=1, decrease=0 |
+| **总计** | **2075** | |
+
+#### 3.1.3 模型对比
+
+训练 9 种模型（8 传统 + 1 深度学习），5 折交叉验证：
+
+| 模型 | 说明 |
+|------|------|
+| XGBoost | 梯度提升树 |
+| LightGBM | 快速梯度提升 |
+| RandomForest | 随机森林 |
+| ExtraTrees | 极端随机树 |
+| AdaBoost | 自适应提升 |
+| GradientBoosting | 经典梯度提升 |
+| LogisticRegression | 逻辑回归（基线） |
+| SVM | 支持向量机（RBF 核） |
+| **DeepLearning (DNN)** | **4 层全连接网络** |
+
+### 3.2 深度学习模型结构
+
+**类名**: `SideEffectNet`
+
+```
+输入 (2075 维)
+    │
+    ▼
+┌─────────────────────┐
+│ Linear(2075, 512)   │
+│ BatchNorm1d(512)    │
+│ GELU                │
+│ Dropout(0.4)        │
+└────────┬────────────┘
+         │
+         ▼
+┌─────────────────────┐
+│ Linear(512, 256)    │
+│ BatchNorm1d(256)    │
+│ GELU                │
+│ Dropout(0.4)        │
+└────────┬────────────┘
+         │
+         ▼
+┌─────────────────────┐
+│ Linear(256, 128)    │
+│ BatchNorm1d(128)    │
+│ GELU                │
+│ Dropout(0.4)        │
+└────────┬────────────┘
+         │
+         ▼
+┌─────────────────────┐
+│ Linear(128, 64)     │
+│ BatchNorm1d(64)     │
+│ GELU                │
+│ Dropout(0.4)        │
+└────────┬────────────┘
+         │
+         ▼
+┌─────────────────────┐
+│ Linear(64, 8)       │
+│ (8 个副作用类别)     │
+└─────────────────────┘
+```
+
+**训练策略**：
+- 损失函数：交叉熵 + 标签平滑（smoothing=0.1）
+- 优化器：AdamW（weight_decay=0.01）
+- 学习率调度：10 epoch 预热 + CosineAnnealing
+- 梯度裁剪：max_norm=1.0
+- 数据增强：高斯噪声（σ=0.01）
+- 早停：30 轮无提升自动停止，最大 200 epoch
+
+### 3.3 模型文件
+
+| 文件 | 说明 |
+|------|------|
+| `side_effect_models/best_deep_model.pth` | 深度学习模型权重 |
+| `side_effect_models/label_encoder.pkl` | 标签编码器（类别↔数字映射） |
+| `side_effect_models/scaler.pkl` | 特征标准化器 |
+| `side_effect_models/model_*.pkl` | 各传统机器学习模型 |
+
+---
+
+## 四、预测系统
+
+### 4.1 交互模式
+
+**脚本**: `predict_side_effect.py`
+
+```bash
+python3 predict_side_effect.py
+```
+
+**输入**：
+1. 药物 SMILES 结构
+2. 菌群蛋白序列
+3. 菌群变化方向（increase/decrease）
+
+**输出**：
+- 预测副作用类别
+- 置信度
+- Top 3 预测结果
+- 因果链分析
+
+### 4.2 批量模式
+
+```bash
+python3 predict_side_effect.py input.xlsx output.xlsx
+```
+
+Excel 需包含列：`SMILES`、`Protein_Sequence`、`变化方向`
+
+### 4.3 因果链分析
+
+使用**扰动分析法**追踪预测决策路径：
+
+1. **基准预测**：正常输入得到预测概率
+2. **特征扰动**：将某一组特征置零，重新预测
+3. **贡献度计算**：概率下降幅度 = 该特征的贡献度
+4. **归一化**：各特征贡献度归一化为百分比
+
+**输出内容**：
+- 完整因果链可视化
+- 各特征组贡献度排名
+- 所有类别概率分布
+- 药物活性子结构数量
+- 蛋白 Top 5 氨基酸组成
+
+---
+
+## 五、输出数据说明
+
+### 5.1 最终 Excel 文件列说明
+
+| 列名 | 类型 | 说明 |
+|------|------|------|
+| `药物名称` | 字符串 | 原始药物名称（可能为中文） |
+| `SMILES` | 字符串 | 药物分子 SMILES 结构式 |
+| `第一个菌种` | 字符串 | 原始菌种名称 |
+| `Protein_Accession` | 字符串 | NCBI 蛋白序列登录号 |
+| `Protein_Sequence` | 字符串 | 菌种蛋白氨基酸序列 |
+| `Predicted_Affinity` | 浮点数 | 药物-蛋白结合亲和力预测值 |
+| `变化方向` | 字符串 | increase（上升）或 decrease（下降） |
+| `副作用分类(英文)` | 字符串 | 副作用类别标签 |
+| `Predicted_SideEffect` | 字符串 | 模型预测的副作用类别 |
+
+### 5.2 副作用类别说明
+
+系统保留样本数前 8 的类别（具体类别取决于训练数据分布），常见类别包括：
+
+| 类别 | 说明 |
+|------|------|
+| Gastrointestinal | 胃肠道反应（恶心、呕吐、腹泻等） |
+| Metabolic/Endocrine | 代谢/内分泌异常 |
+| Liver | 肝毒性 |
+| Neurological | 神经系统反应 |
+| Hematological | 血液系统反应 |
+| Renal | 肾毒性 |
+| Immune-related | 免疫相关反应 |
+| Respiratory | 呼吸系统反应 |
+
+### 5.3 可视化输出
+
+训练完成后自动生成：
+
+| 文件 | 说明 |
+|------|------|
+| `model_comparison.png` | 各模型准确率对比柱状图 |
+| `class_distribution.png` | 副作用类别分布（饼图+条形图） |
+| `per_class_metrics.png` | 各类别 Precision/Recall/F1 对比 |
+| `prediction_summary.xlsx` | 各类别预测性能汇总表 |
+
+---
+
+## 六、环境依赖
+
+```bash
+# 基础依赖
+pip install pandas numpy openpyxl requests openai
+
+# 化学信息学
+pip install rdkit pubchempy
+
+# 深度学习
+pip install torch torch-geometric
+
+# 机器学习
+pip install scikit-learn xgboost lightgbm joblib
+
+# 可视化
+pip install matplotlib seaborn
+```
+
+---
+
+## 七、完整运行流程
+
+```bash
+# 1. 获取药物 SMILES 和菌种蛋白序列
+python3 drug_fetch.py
+
+# 2. 预测药物-蛋白结合亲和力
+python3 predict_binding.py
+
+# 3. 训练副作用预测模型
+python3 train_side_effect_model.py
+
+# 4. 使用模型进行预测（交互模式）
+python3 predict_side_effect.py
+
+# 4. 使用模型进行预测（批量模式）
+python3 predict_side_effect.py input.xlsx output.xlsx
+```
+

@@ -226,19 +226,14 @@ pip install matplotlib seaborn
 ## 完整运行流程
 
 ```bash
-# 1. 获取药物 SMILES 和菌种蛋白序列
-python3 drug_fetch.py
 
-# 2. 预测药物-蛋白结合亲和力
-python3 predict_binding.py
-
-# 3. 训练副作用预测模型
+#  训练副作用预测模型
 python3 train_side_effect_model.py
 
-# 4. 使用模型进行预测（交互模式）
+#  使用模型进行预测（交互模式）
 python3 predict_side_effect.py
 
-# 4. 使用模型进行预测（批量模式）
+#  使用模型进行预测（批量模式）
 python3 predict_side_effect.py input.xlsx output.xlsx
 ```
 
